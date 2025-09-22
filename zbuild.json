@@ -1,0 +1,39 @@
+{
+  "name": "example-project",
+  "version": "1.0.0",
+  "compiler_flags": ["-Wall", "-O2"],
+  "linker_flags": ["-lpthread"],
+  "targets": {
+    "main": {
+      "name": "main",
+      "type": "executable",
+      "sources": ["src/main.c", "src/utils.c"],
+      "output": "example",
+      "dependencies": [],
+      "flags": ["-std=c11"]
+    },
+    "lib": {
+      "name": "lib",
+      "type": "static_library",
+      "sources": ["src/lib.c", "src/helper.c"],
+      "output": "libexample.a",
+      "dependencies": [],
+      "flags": ["-fPIC"]
+    },
+    "test": {
+      "name": "test",
+      "type": "executable",
+      "sources": ["tests/test_main.c", "src/utils.c"],
+      "output": "test_runner",
+      "dependencies": ["lib"],
+      "flags": ["-DTESTING"]
+    }
+  },
+  "dependencies": [
+    {
+      "name": "json-c",
+      "version": "0.15",
+      "git": "https://github.com/json-c/json-c.git"
+    }
+  ]
+}

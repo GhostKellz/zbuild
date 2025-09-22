@@ -2,3 +2,8 @@
 /zig-out/
 *.o
 *.exe
+CLAUDE.md
+TODO.md 
+RUST_TODO.md 
+.zig-cache/
+

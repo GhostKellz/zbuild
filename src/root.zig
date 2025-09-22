@@ -9,7 +9,7 @@ pub fn bufferedPrint() !void {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    try stdout.print("Run `zig build test` to run the tests.\n", .{});
+    std.debug.print("Run `zig build test` to run the tests.\n", .{});
 
     try stdout.flush(); // Don't forget to flush!
 }

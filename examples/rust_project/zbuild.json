@@ -1,0 +1,24 @@
+{
+  "name": "rust-example",
+  "version": "0.1.0",
+  "compiler_flags": [],
+  "linker_flags": [],
+  "targets": {
+    "main": {
+      "name": "main",
+      "type": "executable",
+      "sources": ["src/main.rs"],
+      "output": "rust_example",
+      "dependencies": [],
+      "flags": ["--edition=2021", "-C", "opt-level=2"]
+    },
+    "lib": {
+      "name": "lib",
+      "type": "static_library",
+      "sources": ["src/lib.rs"],
+      "output": "librust_example.rlib",
+      "dependencies": [],
+      "flags": ["--edition=2021", "--crate-type=rlib"]
+    }
+  }
+}
