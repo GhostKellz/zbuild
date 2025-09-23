@@ -1,6 +1,6 @@
 <div align="center">
 
-![zbuild logo](assets/icons/zbuild.png)
+<img src="assets/icons/zbuild.png" alt="zbuild logo" width="175" />
 
 # zbuild
 
