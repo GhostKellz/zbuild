@@ -9,6 +9,14 @@
 [![Parallel Build](https://img.shields.io/badge/Parallel-Build-blue?style=flat&logo=lightning)](https://github.com/ghostkellz/zbuild)
 [![Watch Mode](https://img.shields.io/badge/Watch-Mode-green?style=flat&logo=eye)](https://github.com/ghostkellz/zbuild)
 
+## DISCLAIMER
+
+⚠️ **EXPERIMENTAL LIBRARY - FOR LAB/PERSONAL USE** ⚠️
+
+This is an experimental library under active development. It is
+intended for research, learning, and personal projects. The API is subject
+to change!
+
 Modern Build System for Zig with parallel processing, smart caching, and Rust integration
 
 </div>
