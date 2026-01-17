@@ -6,33 +6,35 @@ pub const Watcher = struct {
     allocator: std.mem.Allocator,
     config: *Config,
     builder: *Builder,
+    io: std.Io,
     watch_paths: std.ArrayList([]const u8),
     ignore_patterns: std.ArrayList([]const u8),
     file_states: std.StringHashMap(FileState),
     poll_interval_ms: u64,
     running: bool,
     rebuild_delay_ms: u64,
-    last_build_time: i64,
+    last_build_time: std.time.Instant,
 
     const FileState = struct {
         path: []const u8,
         size: u64,
-        mtime: i128,
+        mtime: i96,
         hash: ?[32]u8,
     };
 
-    pub fn init(allocator: std.mem.Allocator, config: *Config, builder: *Builder) !Watcher {
+    pub fn init(allocator: std.mem.Allocator, config: *Config, builder: *Builder, io: std.Io) !Watcher {
         var watcher = Watcher{
             .allocator = allocator,
             .config = config,
             .builder = builder,
-            .watch_paths = std.ArrayList([]const u8).init(allocator),
-            .ignore_patterns = std.ArrayList([]const u8).init(allocator),
+            .io = io,
+            .watch_paths = .empty,
+            .ignore_patterns = .empty,
             .file_states = std.StringHashMap(FileState).init(allocator),
             .poll_interval_ms = 100,
             .running = false,
             .rebuild_delay_ms = 200,
-            .last_build_time = 0,
+            .last_build_time = std.time.Instant.now() catch std.time.Instant{ .timestamp = std.posix.timespec{ .sec = 0, .nsec = 0 } },
         };
 
         try watcher.addDefaultIgnorePatterns();
@@ -42,22 +44,22 @@ pub const Watcher = struct {
     }
 
     pub fn deinit(self: *Watcher) void {
-        self.watch_paths.deinit();
-        self.ignore_patterns.deinit();
+        self.watch_paths.deinit(self.allocator);
+        self.ignore_patterns.deinit(self.allocator);
         self.file_states.deinit();
     }
 
     fn addDefaultIgnorePatterns(self: *Watcher) !void {
-        try self.ignore_patterns.append(".git");
-        try self.ignore_patterns.append(".zbuild");
-        try self.ignore_patterns.append("target");
-        try self.ignore_patterns.append("node_modules");
-        try self.ignore_patterns.append("*.o");
-        try self.ignore_patterns.append("*.a");
-        try self.ignore_patterns.append("*.so");
-        try self.ignore_patterns.append("*.dylib");
-        try self.ignore_patterns.append("*.exe");
-        try self.ignore_patterns.append("*.dll");
+        try self.ignore_patterns.append(self.allocator, ".git");
+        try self.ignore_patterns.append(self.allocator, ".zbuild");
+        try self.ignore_patterns.append(self.allocator, "target");
+        try self.ignore_patterns.append(self.allocator, "node_modules");
+        try self.ignore_patterns.append(self.allocator, "*.o");
+        try self.ignore_patterns.append(self.allocator, "*.a");
+        try self.ignore_patterns.append(self.allocator, "*.so");
+        try self.ignore_patterns.append(self.allocator, "*.dylib");
+        try self.ignore_patterns.append(self.allocator, "*.exe");
+        try self.ignore_patterns.append(self.allocator, "*.dll");
     }
 
     fn scanInitialFiles(self: *Watcher) !void {
@@ -73,18 +75,18 @@ pub const Watcher = struct {
     }
 
     fn scanDirectory(self: *Watcher, path: []const u8) !void {
-        var dir = try std.fs.cwd().openDir(path, .{ .iterate = true });
-        defer dir.close();
+        var dir = try std.Io.Dir.openDir(.cwd(), self.io, path, .{ .iterate = true });
+        defer dir.close(self.io);
 
         var walker = try dir.walk(self.allocator);
         defer walker.deinit();
 
-        while (try walker.next()) |entry| {
+        while (try walker.next(self.io)) |entry| {
             if (entry.kind != .file) continue;
 
             if (self.shouldIgnore(entry.path)) continue;
 
-            const full_path = try std.fs.path.join(self.allocator, &.{ path, entry.path });
+            const full_path = try std.Io.Dir.path.join(self.allocator, &.{ path, entry.path });
             defer self.allocator.free(full_path);
 
             try self.addFile(full_path);
@@ -115,15 +117,15 @@ pub const Watcher = struct {
     }
 
     fn addFile(self: *Watcher, path: []const u8) !void {
-        const file = std.fs.cwd().openFile(path, .{}) catch return;
-        defer file.close();
+        const file = std.Io.Dir.openFile(.cwd(), self.io, path, .{}) catch return;
+        defer file.close(self.io);
 
-        const stat = try file.stat();
+        const stat = try file.stat(self.io);
 
         const state = FileState{
             .path = try self.allocator.dupe(u8, path),
             .size = stat.size,
-            .mtime = stat.mtime,
+            .mtime = stat.mtime.nanoseconds,
             .hash = null,
         };
 
@@ -131,7 +133,6 @@ pub const Watcher = struct {
     }
 
     pub fn start(self: *Watcher) !void {
-        // Using std.debug.print instead
         std.debug.print("Starting file watcher...\n", .{});
         std.debug.print("Watching {} files\n", .{self.file_states.count()});
         std.debug.print("Press Ctrl+C to stop\n\n", .{});
@@ -139,17 +140,18 @@ pub const Watcher = struct {
         self.running = true;
 
         try self.builder.build("default");
-        self.last_build_time = std.time.milliTimestamp();
+        self.last_build_time = std.time.Instant.now() catch std.time.Instant{ .timestamp = std.posix.timespec{ .sec = 0, .nsec = 0 } };
 
         while (self.running) {
-            const changes = try self.detectChanges();
-            defer changes.deinit();
+            var changes = try self.detectChanges();
+            defer changes.deinit(self.allocator);
 
             if (changes.items.len > 0) {
                 try self.handleChanges(changes.items);
             }
 
-            std.time.sleep(self.poll_interval_ms * std.time.ns_per_ms);
+            // Sleep using the Io interface
+            std.Io.sleep(self.io, .fromMilliseconds(@intCast(self.poll_interval_ms)), .awake) catch {};
         }
     }
 
@@ -158,32 +160,32 @@ pub const Watcher = struct {
     }
 
     fn detectChanges(self: *Watcher) !std.ArrayList(FileChange) {
-        var changes = std.ArrayList(FileChange).init(self.allocator);
+        var changes: std.ArrayList(FileChange) = .empty;
 
         var it = self.file_states.iterator();
         while (it.next()) |entry| {
             const stored_state = entry.value_ptr.*;
 
-            const file = std.fs.cwd().openFile(stored_state.path, .{}) catch {
-                try changes.append(.{
+            const file = std.Io.Dir.openFile(.cwd(), self.io, stored_state.path, .{}) catch {
+                try changes.append(self.allocator, .{
                     .type = .deleted,
                     .path = stored_state.path,
                 });
                 continue;
             };
-            defer file.close();
+            defer file.close(self.io);
 
-            const current_stat = try file.stat();
+            const current_stat = try file.stat(self.io);
 
-            if (current_stat.mtime > stored_state.mtime or
+            if (current_stat.mtime.nanoseconds > stored_state.mtime or
                 current_stat.size != stored_state.size)
             {
-                try changes.append(.{
+                try changes.append(self.allocator, .{
                     .type = .modified,
                     .path = stored_state.path,
                 });
 
-                entry.value_ptr.mtime = current_stat.mtime;
+                entry.value_ptr.mtime = current_stat.mtime.nanoseconds;
                 entry.value_ptr.size = current_stat.size;
             }
         }
@@ -203,7 +205,8 @@ pub const Watcher = struct {
     };
 
     fn handleChanges(self: *Watcher, changes: []const FileChange) !void {
-        // Using std.debug.print instead
+        // Get current wall clock time for logging
+        const ts = std.posix.clock_gettime(.REALTIME) catch std.posix.timespec{ .sec = 0, .nsec = 0 };
 
         for (changes) |change| {
             const action = switch (change.type) {
@@ -212,33 +215,39 @@ pub const Watcher = struct {
                 .deleted => "Deleted",
             };
             std.debug.print("[{}] {s}: {s}\n", .{
-                std.time.timestamp(),
+                ts.sec,
                 action,
                 change.path,
             });
         }
 
-        const now = std.time.milliTimestamp();
-        if (now - self.last_build_time < @as(i64, @intCast(self.rebuild_delay_ms))) {
+        // Check if enough time has passed since last build
+        const now = std.time.Instant.now() catch std.time.Instant{ .timestamp = std.posix.timespec{ .sec = 0, .nsec = 0 } };
+        const elapsed_ns = now.since(self.last_build_time);
+        const elapsed_ms = elapsed_ns / std.time.ns_per_ms;
+
+        if (elapsed_ms < self.rebuild_delay_ms) {
             return;
         }
 
         std.debug.print("\nRebuilding...\n", .{});
-        const start_time = std.time.milliTimestamp();
+        const start_time = std.time.Instant.now() catch std.time.Instant{ .timestamp = std.posix.timespec{ .sec = 0, .nsec = 0 } };
 
         self.builder.build("default") catch |err| {
             std.debug.print("Build failed: {}\n", .{err});
             return;
         };
 
-        const elapsed = std.time.milliTimestamp() - start_time;
-        std.debug.print("Build completed in {}ms\n\n", .{elapsed});
+        const end_time = std.time.Instant.now() catch std.time.Instant{ .timestamp = std.posix.timespec{ .sec = 0, .nsec = 0 } };
+        const build_elapsed_ns = end_time.since(start_time);
+        const build_elapsed_ms = build_elapsed_ns / std.time.ns_per_ms;
+        std.debug.print("Build completed in {}ms\n\n", .{build_elapsed_ms});
 
-        self.last_build_time = std.time.milliTimestamp();
+        self.last_build_time = end_time;
     }
 
     pub fn addWatchPath(self: *Watcher, path: []const u8) !void {
-        try self.watch_paths.append(try self.allocator.dupe(u8, path));
+        try self.watch_paths.append(self.allocator, try self.allocator.dupe(u8, path));
         try self.scanDirectory(path);
     }
 
@@ -253,7 +262,7 @@ pub const Watcher = struct {
     }
 
     pub fn addIgnorePattern(self: *Watcher, pattern: []const u8) !void {
-        try self.ignore_patterns.append(try self.allocator.dupe(u8, pattern));
+        try self.ignore_patterns.append(self.allocator, try self.allocator.dupe(u8, pattern));
     }
 
     pub fn clearFileCache(self: *Watcher) void {

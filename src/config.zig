@@ -38,9 +38,9 @@ pub const Config = struct {
             .name = "untitled",
             .version = "0.1.0",
             .targets = std.StringHashMap(Target).init(allocator),
-            .dependencies = std.ArrayList(Dependency){},
-            .compiler_flags = std.ArrayList([]const u8){},
-            .linker_flags = std.ArrayList([]const u8){},
+            .dependencies = .empty,
+            .compiler_flags = .empty,
+            .linker_flags = .empty,
         };
     }
 
@@ -52,30 +52,48 @@ pub const Config = struct {
     }
 
     pub fn load(allocator: std.mem.Allocator, path: []const u8) !Config {
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
+        // Load config file synchronously using posix openat with AT.FDCWD
+        const file = try std.posix.openat(std.posix.AT.FDCWD, path, .{}, 0);
+        defer std.posix.close(file);
 
-        const stat = try file.stat();
-        const content = try allocator.alloc(u8, stat.size);
-        defer allocator.free(content);
+        // Read file in chunks since fstat is not available on Linux in 0.16.0-dev
+        var content: std.ArrayList(u8) = .empty;
+        defer content.deinit(allocator);
 
-        _ = try file.readAll(content);
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const bytes_read = try std.posix.read(file, &buf);
+            if (bytes_read == 0) break;
+            try content.appendSlice(allocator, buf[0..bytes_read]);
+        }
 
-        return try parseConfig(allocator, content);
+        return try parseConfig(allocator, content.items);
     }
 
     pub fn save(self: *const Config, path: []const u8) !void {
-        const file = try std.fs.cwd().createFile(path, .{});
-        defer file.close();
+        // Save config file synchronously using posix openat with AT.FDCWD
+        const file = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .CREAT = true, .TRUNC = true, .ACCMODE = .WRONLY }, 0o644);
+        defer std.posix.close(file);
 
-        var json = std.json.ObjectMap.init(self.allocator);
-        defer json.deinit();
+        const config_data = .{
+            .name = self.name,
+            .version = self.version,
+        };
 
-        try json.put("name", .{ .string = self.name });
-        try json.put("version", .{ .string = self.version });
+        // Serialize to JSON using Stringify.valueAlloc
+        const json_data = try std.json.Stringify.valueAlloc(self.allocator, config_data, .{ .whitespace = .indent_2 });
+        defer self.allocator.free(json_data);
 
-        const writer = file.writer();
-        try std.json.stringify(.{ .object = json }, .{ .whitespace = .indent_2 }, writer);
+        // Write to file
+        var written: usize = 0;
+        while (written < json_data.len) {
+            const result = std.os.linux.write(file, json_data[written..].ptr, json_data.len - written);
+            const err = std.posix.errno(result);
+            if (err != .SUCCESS) {
+                return error.WriteError;
+            }
+            written += result;
+        }
     }
 
     fn parseConfig(allocator: std.mem.Allocator, content: []const u8) !Config {
@@ -107,10 +125,10 @@ pub const Config = struct {
         var target = Target{
             .name = "",
             .type = .executable,
-            .sources = std.ArrayList([]const u8){},
-            .dependencies = std.ArrayList([]const u8){},
+            .sources = .empty,
+            .dependencies = .empty,
             .output = "",
-            .flags = std.ArrayList([]const u8){},
+            .flags = .empty,
         };
 
         if (value.object.get("name")) |name| {

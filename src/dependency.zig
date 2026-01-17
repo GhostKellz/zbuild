@@ -5,6 +5,7 @@ pub const Dependency = struct {
     registry: std.StringHashMap(Package),
     resolved: std.StringHashMap(ResolvedPackage),
     lock_file: []const u8,
+    io: std.Io,
 
     pub const Package = struct {
         name: []const u8,
@@ -38,12 +39,13 @@ pub const Dependency = struct {
         hash: [32]u8,
     };
 
-    pub fn init(allocator: std.mem.Allocator) Dependency {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) Dependency {
         return .{
             .allocator = allocator,
             .registry = std.StringHashMap(Package).init(allocator),
             .resolved = std.StringHashMap(ResolvedPackage).init(allocator),
             .lock_file = "zbuild.lock",
+            .io = io,
         };
     }
 
@@ -113,41 +115,37 @@ pub const Dependency = struct {
 
         std.fs.cwd().deleteTree(deps_dir) catch {};
 
-        var argv = std.ArrayList([]const u8).init(self.allocator);
-        defer argv.deinit();
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(self.allocator);
 
-        try argv.append("git");
-        try argv.append("clone");
+        try argv.append(self.allocator, "git");
+        try argv.append(self.allocator, "clone");
 
         if (git.branch) |branch| {
-            try argv.append("-b");
-            try argv.append(branch);
+            try argv.append(self.allocator, "-b");
+            try argv.append(self.allocator, branch);
         }
 
-        try argv.append(git.url);
-        try argv.append(deps_dir);
+        try argv.append(self.allocator, git.url);
+        try argv.append(self.allocator, deps_dir);
 
-        const result = try std.process.Child.run(.{
-            .allocator = self.allocator,
-            .argv = argv.items,
-        });
+        const result = try runProcess(self.allocator, self.io, argv.items);
         defer self.allocator.free(result.stdout);
         defer self.allocator.free(result.stderr);
 
-        if (result.term.Exited != 0) {
-            return error.GitCloneFailed;
+        switch (result.term) {
+            .exited => |code| if (code != 0) return error.GitCloneFailed,
+            else => return error.GitCloneFailed,
         }
 
         if (git.commit) |commit| {
-            const checkout_result = try std.process.Child.run(.{
-                .allocator = self.allocator,
-                .argv = &.{ "git", "-C", deps_dir, "checkout", commit },
-            });
+            const checkout_result = try runProcess(self.allocator, self.io, &.{ "git", "-C", deps_dir, "checkout", commit });
             defer self.allocator.free(checkout_result.stdout);
             defer self.allocator.free(checkout_result.stderr);
 
-            if (checkout_result.term.Exited != 0) {
-                return error.GitCheckoutFailed;
+            switch (checkout_result.term) {
+                .exited => |code| if (code != 0) return error.GitCheckoutFailed,
+                else => return error.GitCheckoutFailed,
             }
         }
 
@@ -188,32 +186,37 @@ pub const Dependency = struct {
         const file = try std.fs.cwd().createFile(self.lock_file, .{});
         defer file.close();
 
-        var json = std.json.ObjectMap.init(self.allocator);
-        defer json.deinit();
-
-        var packages = std.json.ObjectMap.init(self.allocator);
-        defer packages.deinit();
+        // Build a simple structure for JSON serialization
+        var packages_list: std.ArrayList(LockPackageEntry) = .empty;
+        defer packages_list.deinit(self.allocator);
 
         var it = self.resolved.iterator();
         while (it.next()) |entry| {
             const pkg = entry.value_ptr.*;
-            var pkg_json = std.json.ObjectMap.init(self.allocator);
-
-            try pkg_json.put("version", .{ .string = pkg.version });
-            try pkg_json.put("path", .{ .string = pkg.path });
-
-            const hash_hex = try std.fmt.allocPrint(self.allocator, "{}", .{std.fmt.fmtSliceHexLower(&pkg.hash)});
-            defer self.allocator.free(hash_hex);
-            try pkg_json.put("hash", .{ .string = hash_hex });
-
-            try packages.put(pkg.name, .{ .object = pkg_json });
+            try packages_list.append(self.allocator, .{
+                .name = pkg.name,
+                .version = pkg.version,
+                .path = pkg.path,
+                .hash = std.fmt.bytesToHex(pkg.hash, .lower),
+            });
         }
 
-        try json.put("packages", .{ .object = packages });
+        const lock_data = .{
+            .packages = packages_list.items,
+        };
 
-        const writer = file.writer();
-        try std.json.stringify(.{ .object = json }, .{ .whitespace = .indent_2 }, writer);
+        var buffered_writer: std.io.BufferedWriter(4096, @TypeOf(file.writer())) = .{ .unbuffered_writer = file.writer() };
+        var jws = std.json.writeStream(buffered_writer.writer(), .{ .whitespace = .indent_2 });
+        try jws.write(lock_data);
+        try buffered_writer.flush();
     }
+
+    const LockPackageEntry = struct {
+        name: []const u8,
+        version: []const u8,
+        path: []const u8,
+        hash: [64]u8,
+    };
 
     pub fn readLockFile(self: *Dependency) !void {
         const file = std.fs.cwd().openFile(self.lock_file, .{}) catch {
@@ -256,3 +259,7 @@ pub const Dependency = struct {
         return null;
     }
 };
+
+fn runProcess(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8) !std.process.RunResult {
+    return std.process.run(allocator, io, .{ .argv = argv });
+}

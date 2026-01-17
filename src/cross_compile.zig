@@ -76,13 +76,13 @@ pub const CrossCompile = struct {
     pub fn deinit(self: *CrossCompile) void {
         var target_it = self.targets.iterator();
         while (target_it.next()) |entry| {
-            entry.value_ptr.cpu_features.deinit();
+            entry.value_ptr.cpu_features.deinit(self.allocator);
         }
         self.targets.deinit();
 
         var toolchain_it = self.toolchains.iterator();
         while (toolchain_it.next()) |entry| {
-            entry.value_ptr.flags.deinit();
+            entry.value_ptr.flags.deinit(self.allocator);
             entry.value_ptr.env_vars.deinit();
         }
         self.toolchains.deinit();
@@ -103,7 +103,7 @@ pub const CrossCompile = struct {
             .linker = try self.getLinkerForTarget(target),
             .archiver = try self.getArchiverForTarget(target),
             .sysroot = target.sysroot,
-            .flags = std.ArrayList([]const u8).init(self.allocator),
+            .flags = .empty,
             .env_vars = std.StringHashMap([]const u8).init(self.allocator),
         };
 
@@ -189,24 +189,22 @@ pub const CrossCompile = struct {
     }
 
     fn addDefaultFlags(self: *CrossCompile, toolchain: *Toolchain, target: *const TargetConfig) !void {
-        _ = self;
-
         const triple = try self.getTargetTriple(target);
         defer self.allocator.free(triple);
 
-        try toolchain.flags.append(try std.fmt.allocPrint(self.allocator, "-target={s}", .{triple}));
+        try toolchain.flags.append(self.allocator, try std.fmt.allocPrint(self.allocator, "-target={s}", .{triple}));
 
         switch (target.arch) {
-            .x86 => try toolchain.flags.append("-m32"),
-            .x86_64 => try toolchain.flags.append("-m64"),
+            .x86 => try toolchain.flags.append(self.allocator, "-m32"),
+            .x86_64 => try toolchain.flags.append(self.allocator, "-m64"),
             .arm => {
                 if (target.abi == .gnueabihf) {
-                    try toolchain.flags.append("-mfloat-abi=hard");
+                    try toolchain.flags.append(self.allocator, "-mfloat-abi=hard");
                 }
             },
             .wasm32, .wasm64 => {
-                try toolchain.flags.append("-fno-exceptions");
-                try toolchain.flags.append("-fno-rtti");
+                try toolchain.flags.append(self.allocator, "-fno-exceptions");
+                try toolchain.flags.append(self.allocator, "-fno-rtti");
             },
             else => {},
         }
@@ -214,29 +212,29 @@ pub const CrossCompile = struct {
         switch (target.os) {
             .windows => {
                 if (target.abi == .gnu) {
-                    try toolchain.flags.append("-pthread");
+                    try toolchain.flags.append(self.allocator, "-pthread");
                 }
             },
             .linux, .freebsd, .openbsd, .netbsd => {
-                try toolchain.flags.append("-pthread");
-                try toolchain.flags.append("-fPIC");
+                try toolchain.flags.append(self.allocator, "-pthread");
+                try toolchain.flags.append(self.allocator, "-fPIC");
             },
             .macos, .ios => {
-                try toolchain.flags.append("-fobjc-arc");
+                try toolchain.flags.append(self.allocator, "-fobjc-arc");
             },
             .android => {
-                try toolchain.flags.append("-fPIE");
-                try toolchain.flags.append("-fPIC");
+                try toolchain.flags.append(self.allocator, "-fPIE");
+                try toolchain.flags.append(self.allocator, "-fPIC");
             },
             .wasi => {
-                try toolchain.flags.append("-nostdlib");
-                try toolchain.flags.append("-nostartfiles");
+                try toolchain.flags.append(self.allocator, "-nostdlib");
+                try toolchain.flags.append(self.allocator, "-nostartfiles");
             },
             else => {},
         }
 
         if (target.sysroot) |sysroot| {
-            try toolchain.flags.append(try std.fmt.allocPrint(self.allocator, "--sysroot={s}", .{sysroot}));
+            try toolchain.flags.append(self.allocator, try std.fmt.allocPrint(self.allocator, "--sysroot={s}", .{sysroot}));
         }
     }
 

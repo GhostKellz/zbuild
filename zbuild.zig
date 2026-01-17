@@ -7,47 +7,59 @@ const ParallelBuilder = @import("src/parallel.zig").ParallelBuilder;
 const Watcher = @import("src/watch.zig").Watcher;
 const Benchmark = @import("src/benchmark.zig").Benchmark;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    // Collect command line arguments into a slice
+    var args_list: std.ArrayList([]const u8) = .empty;
+    defer args_list.deinit(allocator);
+
+    var args_iter = std.process.Args.Iterator.initAllocator(init.minimal.args, allocator) catch {
+        printUsage();
+        return;
+    };
+    defer args_iter.deinit();
+
+    while (args_iter.next()) |arg| {
+        try args_list.append(allocator, arg);
+    }
+
+    const args = args_list.items;
 
     if (args.len < 2) {
-        try printUsage();
+        printUsage();
         return;
     }
 
     const command = args[1];
 
     if (std.mem.eql(u8, command, "build")) {
-        try runBuild(allocator, args[2..]);
+        try runBuild(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "clean")) {
         try runClean(allocator);
     } else if (std.mem.eql(u8, command, "test")) {
-        try runTest(allocator, args[2..]);
+        try runTest(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "init")) {
         try runInit(allocator);
     } else if (std.mem.eql(u8, command, "watch")) {
-        try runWatch(allocator, args[2..]);
+        try runWatch(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "parallel")) {
-        try runParallelBuild(allocator, args[2..]);
+        try runParallelBuild(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "benchmark")) {
-        try runBenchmark(allocator, args[2..]);
+        try runBenchmark(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "graph")) {
-        try runGraphVisualization(allocator, args[2..]);
+        try runGraphVisualization(allocator, io, args[2..]);
     } else {
-        try printUsage();
+        printUsage();
     }
 }
 
-fn runBuild(allocator: std.mem.Allocator, args: []const [:0]u8) !void {
+fn runBuild(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !void {
     var config = try Config.load(allocator, "zbuild.json");
     defer config.deinit();
 
-    var builder = try Builder.init(allocator, &config);
+    var builder = try Builder.init(allocator, &config, io);
     defer builder.deinit();
 
     const target = if (args.len > 0) args[0] else "default";
@@ -55,16 +67,16 @@ fn runBuild(allocator: std.mem.Allocator, args: []const [:0]u8) !void {
 }
 
 fn runClean(allocator: std.mem.Allocator) !void {
-    const cache = try Cache.init(allocator, ".zbuild");
+    var cache = try Cache.init(allocator, ".zbuild");
     defer cache.deinit();
     try cache.clean();
 }
 
-fn runTest(allocator: std.mem.Allocator, args: []const [:0]u8) !void {
+fn runTest(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !void {
     var config = try Config.load(allocator, "zbuild.json");
     defer config.deinit();
 
-    var builder = try Builder.init(allocator, &config);
+    var builder = try Builder.init(allocator, &config, io);
     defer builder.deinit();
 
     const target = if (args.len > 0) args[0] else "test";
@@ -82,27 +94,27 @@ fn runInit(allocator: std.mem.Allocator) !void {
     std.debug.print("Created zbuild.json\n", .{});
 }
 
-fn runWatch(allocator: std.mem.Allocator, args: []const [:0]u8) !void {
+fn runWatch(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !void {
     _ = args;
     var config = try Config.load(allocator, "zbuild.json");
     defer config.deinit();
 
-    var builder = try Builder.init(allocator, &config);
+    var builder = try Builder.init(allocator, &config, io);
     defer builder.deinit();
 
-    var watcher = try Watcher.init(allocator, &config, &builder);
+    var watcher = try Watcher.init(allocator, &config, &builder, io);
     defer watcher.deinit();
 
     try watcher.start();
 }
 
-fn runParallelBuild(allocator: std.mem.Allocator, args: []const [:0]u8) !void {
+fn runParallelBuild(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !void {
     var config = try Config.load(allocator, "zbuild.json");
     defer config.deinit();
 
     const max_jobs = if (args.len > 0) try std.fmt.parseInt(usize, args[0], 10) else 0;
 
-    var parallel_builder = try ParallelBuilder.init(allocator, max_jobs);
+    var parallel_builder = try ParallelBuilder.init(allocator, max_jobs, io);
     defer parallel_builder.deinit();
 
     try parallel_builder.createBuildPlan(&config);
@@ -118,42 +130,43 @@ fn runParallelBuild(allocator: std.mem.Allocator, args: []const [:0]u8) !void {
     std.debug.print("  Parallelism: {}\n", .{stats.parallelism});
 }
 
-fn runBenchmark(allocator: std.mem.Allocator, args: []const [:0]u8) !void {
+fn runBenchmark(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !void {
     _ = args;
     var config = try Config.load(allocator, "zbuild.json");
     defer config.deinit();
 
-    var builder = try Builder.init(allocator, &config);
+    var builder = try Builder.init(allocator, &config, io);
     defer builder.deinit();
 
-    var benchmark = Benchmark.init(allocator);
+    var benchmark = Benchmark.init(allocator, io);
     defer benchmark.deinit();
 
     try benchmark.runFullSuite(&config, &builder);
 }
 
-fn runGraphVisualization(allocator: std.mem.Allocator, args: []const [:0]u8) !void {
+fn runGraphVisualization(allocator: std.mem.Allocator, io: std.Io, args: []const []const u8) !void {
     var config = try Config.load(allocator, "zbuild.json");
     defer config.deinit();
 
-    var parallel_builder = try ParallelBuilder.init(allocator, 0);
+    var parallel_builder = try ParallelBuilder.initWithoutIo(allocator, 0);
     defer parallel_builder.deinit();
 
     try parallel_builder.createBuildPlan(&config);
 
     const output_file = if (args.len > 0) args[0] else "build_graph.dot";
-    const file = try std.fs.cwd().createFile(output_file, .{});
-    defer file.close();
+    const file = try std.Io.Dir.createFile(.cwd(), io, output_file, .{});
+    defer file.close(io);
 
-    const writer = file.writer();
-    try parallel_builder.visualizeBuildGraph(writer);
+    var write_buffer: [4096]u8 = undefined;
+    var file_writer = file.writer(io, &write_buffer);
+    try parallel_builder.visualizeBuildGraph(&file_writer.interface);
+    try file_writer.flush();
 
-    // Using std.debug.print instead
     std.debug.print("Build graph saved to {s}\n", .{output_file});
     std.debug.print("Use 'dot -Tpng {s} -o graph.png' to generate image\n", .{output_file});
 }
 
-fn printUsage() !void {
+fn printUsage() void {
     std.debug.print(
         \\zbuild - Modern Build System
         \\
